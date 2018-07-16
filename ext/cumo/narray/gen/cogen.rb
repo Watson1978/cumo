@@ -8,7 +8,7 @@ require_relative "./narray_def"
 
 while true
   if ARGV[0] == "-l"
-    require "erbpp/line_number"
+    # require "erbpp/line_number"
     ARGV.shift
   elsif ARGV[0] == "-o"
     ARGV.shift
