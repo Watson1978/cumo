@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
-
+#include <string>
 #include <cuda_runtime.h>
 
 // CUDA memory pool implementation highly referring CuPy
