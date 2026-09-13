@@ -1273,7 +1273,7 @@ ndloop_sync_src_index(cumo_na_buffer_copy_t *lp)
     for (i=0; i<lp->ndim; i++) {
         if (LITER_SRC(lp,i).idx) {
             CUMO_SHOW_SYNCHRONIZE_WARNING_ONCE("ndloop buffer copy", "any");
-            cumo_cuda_runtime_check_status(cudaDeviceSynchronize());
+            cumo_cuda_runtime_device_synchronize();
             return;
         }
     }
@@ -1291,7 +1291,7 @@ ndloop_sync_user_index(cumo_na_md_loop_t *lp)
             if (LARG(lp,j).iter[i].idx == NULL) continue;
             if (cumo_cuda_runtime_is_device_memory(LARG(lp,j).ptr)) break;
             CUMO_SHOW_SYNCHRONIZE_WARNING_ONCE("ndloop", "any");
-            cumo_cuda_runtime_check_status(cudaDeviceSynchronize());
+            cumo_cuda_runtime_device_synchronize();
             return;
         }
     }
@@ -1525,16 +1525,44 @@ static void
 ndloop_sync_device(void)
 {
     CUMO_SHOW_SYNCHRONIZE_WARNING_ONCE("ndloop", "any");
-    cumo_cuda_runtime_check_status(cudaDeviceSynchronize());
+    cumo_cuda_runtime_device_synchronize();
+}
+
+// An argument walked through an index array is a view whose fills were counted,
+// so ask that view rather than stopping the device outright: one that settled
+// since costs nothing, and one that has not settles every other argument with
+// it. The index an iterator walks belongs to the view this argument was built
+// from, which ndloop_set_stepidx put in LARG(lp,j).value.
+static void
+ndloop_wait_arg_index(cumo_na_md_loop_t *lp, int j)
+{
+    cumo_narray_t *na;
+    VALUE v;
+
+    if (!loop_arg_is_using_idx(lp, j)) {
+        return;
+    }
+    v = LARG(lp,j).value;
+    if (!CumoIsNArray(v)) {
+        ndloop_sync_device();
+        return;
+    }
+    CumoGetNArray(v, na);
+    if (na->type != CUMO_NARRAY_VIEW_T) {
+        ndloop_sync_device();
+        return;
+    }
+    cumo_na_index_wait_fill((cumo_narray_view_t *)na);
 }
 
 static void
 ndloop_sync_md_index(cumo_na_md_loop_t *lp)
 {
-    if (!loop_is_using_idx(lp)) {
-        return;
+    int j;
+
+    for (j=0; j<lp->narg; j++) {
+        ndloop_wait_arg_index(lp, j);
     }
-    ndloop_sync_device();
 }
 
 static void
@@ -1990,13 +2018,12 @@ loop_store_subnarray(cumo_ndfunc_t *nf, cumo_na_md_loop_t *lp, int i0, size_t *c
 
     // The sub-narray binds its own index array here, after the entry point
     // looked, so the wait for the kernel that filled it belongs here too. The
-    // destination was waited for at the entry point, so a row that binds no
-    // index the loop below walks has nothing left to wait for. An index on the
-    // row's last dimension goes to the per-dtype store iterator, which waits
-    // for itself where it reads one on the host.
-    if (loop_arg_is_using_idx(lp, 1)) {
-        ndloop_sync_device();
-    }
+    // destination was asked about at the entry point, which waits only if it
+    // has not settled, so a row that binds no index the loop below walks has
+    // nothing left to ask. An index on the row's last dimension goes to the
+    // per-dtype store iterator, which waits for itself where it reads one on
+    // the host.
+    ndloop_wait_arg_index(lp, 1);
 
     // loop body
     reach = ALLOCA_N(bool, nd+1);

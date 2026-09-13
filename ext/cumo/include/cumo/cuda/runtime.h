@@ -13,6 +13,13 @@ extern "C" {
 
 extern VALUE cumo_cuda_eRuntimeError;
 
+// How many times the whole device has been seen to settle, which is what a host
+// read of managed memory needs. One settling covers every kernel and copy issued
+// before it, so code that recorded the count when it queued work can skip a wait
+// the moment the count has moved on. Only cumo_cuda_runtime_device_synchronize
+// advances it, and a count that is behind costs a wait rather than correctness.
+extern uint64_t cumo_cuda_sync_epoch;
+
 static inline void
 cumo_cuda_runtime_check_status(cudaError_t status)
 {
@@ -21,8 +28,17 @@ cumo_cuda_runtime_check_status(cudaError_t status)
     }
 }
 
+static inline void
+cumo_cuda_runtime_device_synchronize(void)
+{
+    cumo_cuda_runtime_check_status(cudaDeviceSynchronize());
+    cumo_cuda_sync_epoch++;
+}
+
 // Asking costs less than half of waiting, and there is nothing to wait for
-// whenever the block stayed off the device.
+// whenever the block stayed off the device. Neither answer advances the settle
+// count: stream 0 going quiet is not the whole device settling, and a host read
+// of managed memory needs the latter where concurrentManagedAccess is 0.
 static inline int
 cumo_cuda_runtime_sync_if_busy(void)
 {

@@ -5,6 +5,7 @@
 
 VALUE cumo_cuda_eRuntimeError;
 VALUE cumo_cuda_mRuntime;
+uint64_t cumo_cuda_sync_epoch = 0;
 #define eRuntimeError cumo_cuda_eRuntimeError
 #define mRuntime cumo_cuda_mRuntime
 
@@ -42,7 +43,7 @@ cumo_cuda_runtime_error_flag_new(void)
 bool
 cumo_cuda_runtime_error_flag_get(int *flag)
 {
-    check_status(cudaDeviceSynchronize());
+    cumo_cuda_runtime_device_synchronize();
     return (*flag != 0);
 }
 
@@ -189,9 +190,7 @@ rb_cudaSetDevice(VALUE self, VALUE device)
 static VALUE
 rb_cudaDeviceSynchronize(VALUE self)
 {
-    cudaError_t status;
-    status = cudaDeviceSynchronize();
-    check_status(status);
+    cumo_cuda_runtime_device_synchronize();
     return Qnil;
 }
 
