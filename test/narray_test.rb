@@ -4760,6 +4760,22 @@ class NArrayTest < Test::Unit::TestCase
     end
   end
 
+  test "a view waits for the index array its constructor queued" do
+    n = 1 << 16
+    a = Cumo::DFloat.new(n).seq
+    idx = Array.new(n) { |i| n - 1 - i }
+
+    # The copy that fills the index is queued, not finished, so reading one of
+    # its elements has to wait for it however many times the device has settled
+    # for other reasons since.
+    10.times do
+      v = a[idx]
+      assert_equal([(n - 1).to_f], v[0].to_a)
+      assert_equal([0.0], v[n - 1].to_a)
+      assert_equal([1.0], v.reverse[1].to_a)
+    end
+  end
+
   test "no view holds an index array nobody owns" do
     out = run_child(<<~RUBY)
       require "cumo/narray"
