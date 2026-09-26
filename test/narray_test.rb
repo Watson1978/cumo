@@ -1210,6 +1210,63 @@ class NArrayTest < Test::Unit::TestCase
       end
     end
 
+    # A contiguous operand, or a row repeated down the rows, is moved 16 bytes
+    # at a time. A reversed view walks backwards, so it takes the loop that
+    # moves one element and gives the answer to compare with.
+    sub_test_case "#{dtype}, elementwise on rows moved 16 bytes at a time" do
+      small = ->(shape, from = 1) { dtype.cast(Array.new(shape.reduce(:*)) { |i| i % 7 + from }).reshape(*shape) }
+      flip = ->(a) { a.reverse }
+
+      test "binary and unary over lengths that end short of 16 bytes" do
+        [1, 3, 7, 15, 16, 17, 33, 1027].each do |n|
+          x = small.call([n])
+          y = small.call([n], 3)
+          assert { x + y == flip.call(flip.call(x) + flip.call(y)) }
+          assert { y - x == flip.call(flip.call(y) - flip.call(x)) }
+          assert { -x == flip.call(-flip.call(x)) }
+          assert { x * 3 == flip.call(flip.call(x) * 3) }
+          assert { 9 - x == flip.call(9 - flip.call(x)) }
+        end
+      end
+
+      test "binary with a row repeated on either side" do
+        [[1, 32], [3, 32], [5, 16], [4, 48], [3, 12]].each do |shape|
+          m = small.call(shape, 4)
+          row = small.call([shape.last])
+          assert { m + row == flip.call(flip.call(m) + flip.call(row)) }
+          assert { m - row == flip.call(flip.call(m) - flip.call(row)) }
+          assert { row - m == flip.call(flip.call(row) - flip.call(m)) }
+          assert { m - 2 == flip.call(flip.call(m) - 2) }
+          assert { 2 - m == flip.call(2 - flip.call(m)) }
+        end
+      end
+
+      test "binary writing over one of its operands" do
+        x = small.call([3, 32])
+        y = small.call([3, 32], 2)
+        expected = flip.call(flip.call(x) * flip.call(y))
+        x.inplace * y
+        assert { x == expected }
+      end
+
+      test "binary on operands that do not start on 16 bytes" do
+        flat = small.call([65])
+        x = flat[1..-1]
+        y = small.call([64])
+        assert { x + y == flip.call(flip.call(x) + flip.call(y)) }
+        assert { y - x == flip.call(flip.call(y) - flip.call(x)) }
+      end
+
+      if [Cumo::DFloat, Cumo::SFloat, Cumo::HFloat, Cumo::BFloat].include?(dtype)
+        test "a math function over lengths that end short of 16 bytes" do
+          [1, 7, 17, 1027].each do |n|
+            x = dtype.cast(Array.new(n) { |i| (i % 7 - 3) * 0.5 })
+            assert { dtype::Math.gelu(x) == flip.call(dtype::Math.gelu(flip.call(x))) }
+          end
+        end
+      end
+    end
+
     sub_test_case "#{dtype}, #dot" do
       test "scalar.dot(scalar)" do
         a = dtype[1].sum
