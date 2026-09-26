@@ -106,11 +106,79 @@ static int
     return 1;
 }
 
+//<% vec_ok = type_name != 'dcomplex' && !(is_int and %w[div mod].include? name) %>
+//<% if vec_ok %>
+// Moves 16 bytes of each operand per thread; see cumo_na_indexer_vec_row.
+// use_scalar is as in the kernels above, and p2 goes unused when it is set.
+__global__ void <%="cumo_#{c_iter}_vec_kernel"%>(char* p1, char* p2, char* p3, uint32_t n, uint32_t row, unsigned bcast, dtype sv, int use_scalar)
+{
+    typedef cumo_na_vec16_t<dtype> vec_t;
+    const uint32_t vlen = sizeof(vec_t) / sizeof(dtype);
+    uint32_t i = (blockIdx.x * blockDim.x + threadIdx.x) * vlen;
+
+    if (i + vlen <= n) {
+        uint32_t col = bcast ? i % row : i;
+        vec_t u = *(vec_t*)(p1 + (size_t)((bcast & 1) ? col : i) * sizeof(dtype));
+        vec_t w, z;
+        if (use_scalar) {
+#pragma unroll
+            for (uint32_t k = 0; k < vlen; ++k) w.v[k] = sv;
+        } else {
+            w = *(vec_t*)(p2 + (size_t)((bcast & 2) ? col : i) * sizeof(dtype));
+        }
+#pragma unroll
+        for (uint32_t k = 0; k < vlen; ++k) {
+            z.v[k] = (use_scalar == 2) ? m_<%=name%>(w.v[k], u.v[k]) : m_<%=name%>(u.v[k], w.v[k]);
+        }
+        *(vec_t*)(p3 + (size_t)i * sizeof(dtype)) = z;
+    } else {
+        // Only a row that nothing repeats can end short of a whole vector.
+        for (; i < n; ++i) {
+            dtype x = ((dtype*)p1)[i];
+            dtype y = use_scalar ? sv : ((dtype*)p2)[i];
+            ((dtype*)p3)[i] = (use_scalar == 2) ? m_<%=name%>(y, x) : m_<%=name%>(x, y);
+        }
+    }
+}
+
+static int
+<%="cumo_#{c_iter}_launch_vec"%>(cumo_na_iarray_t* a1, cumo_na_iarray_t* a2, cumo_na_iarray_t* a3, cumo_na_indexer_t* indexer, dtype sv, int use_scalar)
+{
+    const cumo_na_iarray_t* const arrays[] = {a1, a2, a3};
+    const cumo_na_iarray_t* const scalar_arrays[] = {a1, a3};
+    const uint64_t vlen = sizeof(cumo_na_vec16_t<dtype>) / sizeof(dtype);
+    unsigned bcast;
+    uint32_t row;
+    uint64_t threads;
+
+    if (use_scalar) {
+        row = cumo_na_indexer_vec_row(indexer, scalar_arrays, 2, sizeof(dtype), &bcast);
+    } else {
+        row = cumo_na_indexer_vec_row(indexer, arrays, 3, sizeof(dtype), &bcast);
+    }
+    if (row == 0) {
+        return 0;
+    }
+    threads = (indexer->total_size + vlen - 1) / vlen;
+    <%="cumo_#{c_iter}_vec_kernel"%><<<(threads + CUMO_MAX_BLOCK_DIM - 1) / CUMO_MAX_BLOCK_DIM, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(
+        a1->ptr, a2->ptr, a3->ptr, (uint32_t)indexer->total_size, row, bcast, sv, use_scalar);
+    cumo_cuda_runtime_check_kernel_launch();
+    return 1;
+}
+//<% end %>
+
 //<% if has_scalar %>
 static void <%="cumo_#{c_iter}_kernel_dispatch"%>(cumo_na_iarray_t* a1, cumo_na_iarray_t* a2, cumo_na_iarray_t* a3, cumo_na_indexer_t* indexer, int* divzero, dtype sv, int use_scalar)
 {
-    size_t grid_dim = cumo_get_grid_dim(indexer->total_size);
-    size_t block_dim = cumo_get_block_dim(indexer->total_size);
+    size_t grid_dim, block_dim;
+
+    //<% if vec_ok %>
+    if (<%="cumo_#{c_iter}_launch_vec"%>(a1,a2,a3,indexer,sv,use_scalar)) {
+        return;
+    }
+    //<% end %>
+    grid_dim = cumo_get_grid_dim(indexer->total_size);
+    block_dim = cumo_get_block_dim(indexer->total_size);
     <%= indexer_switch("cumo_#{c_iter}_kernel", "*a1,*a2,*a3,*indexer,divzero,sv,use_scalar", narrow: %w[a1 a2 a3]) %>
     cumo_cuda_runtime_check_kernel_launch();
 }

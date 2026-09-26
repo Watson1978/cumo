@@ -451,6 +451,53 @@ cumo_na_indexer_is_narrow(const cumo_na_indexer_t* indexer, const cumo_na_iarray
     return 1;
 }
 
+// An elementwise kernel moves one element per thread, which leaves too few
+// loads in flight to keep memory busy. When the last axis is contiguous in
+// every operand, a thread can move 16 bytes of each at once instead. Another
+// axis may walk whole rows or repeat one row, as a bias added to every row
+// does.
+extern "C++" {
+template<typename T>
+struct __align__(16) cumo_na_vec16_t {
+    T v[16 / sizeof(T)];
+};
+}
+
+// Answers the length of the row an operand may repeat, or 0 when the shape
+// does not suit 16-byte moves. The last of iarrays is the output, which has to
+// walk every row. bcast gets bit k set for each operand k that repeats a row.
+// With nothing repeated the whole array counts as one row, whatever its length.
+static inline uint32_t
+cumo_na_indexer_vec_row(const cumo_na_indexer_t* indexer, const cumo_na_iarray_t* const* iarrays, int n, size_t esz, unsigned* bcast)
+{
+    int ndim = indexer->ndim;
+    size_t rows, cols;
+
+    *bcast = 0;
+    if (esz >= 16 || 16 % esz != 0) return 0;
+    if (indexer->total_size == 0 || indexer->total_size > INT32_MAX) return 0;
+    if (ndim == 1) {
+        rows = 1;
+        cols = indexer->shape[0];
+    } else if (ndim == 2) {
+        rows = indexer->shape[0];
+        cols = indexer->shape[1];
+    } else {
+        return 0;
+    }
+    for (int k = 0; k < n; ++k) {
+        if ((uintptr_t)iarrays[k]->ptr % 16 != 0) return 0;
+        if (iarrays[k]->step[ndim - 1] != (ssize_t)esz) return 0;
+        if (rows > 1 && iarrays[k]->step[0] != (ssize_t)(esz * cols)) {
+            if (iarrays[k]->step[0] != 0 || k == n - 1) return 0;
+            *bcast |= 1u << k;
+        }
+    }
+    if (*bcast == 0) return (uint32_t)indexer->total_size;
+    if (cols % (16 / esz) != 0) return 0;
+    return (uint32_t)cols;
+}
+
 __host__ __device__
 static inline size_t
 cumo_na_bit_iarray_at_dim(cumo_na_bit_iarray_t* iarray, cumo_na_indexer_t* indexer) {
