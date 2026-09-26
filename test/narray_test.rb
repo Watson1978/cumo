@@ -1230,10 +1230,11 @@ class NArrayTest < Test::Unit::TestCase
       end
 
       test "binary with a row repeated on either side" do
-        [[1, 32], [3, 32], [5, 16], [4, 48], [3, 12]].each do |shape|
+        [[1, 32], [3, 32], [5, 16], [4, 48], [3, 12], [300, 48]].each do |shape|
           m = small.call(shape, 4)
           row = small.call([shape.last])
           assert { m + row == flip.call(flip.call(m) + flip.call(row)) }
+          assert { -m == flip.call(-flip.call(m)) }
           assert { m - row == flip.call(flip.call(m) - flip.call(row)) }
           assert { row - m == flip.call(flip.call(row) - flip.call(m)) }
           assert { m - 2 == flip.call(flip.call(m) - 2) }
@@ -1247,6 +1248,12 @@ class NArrayTest < Test::Unit::TestCase
         expected = flip.call(flip.call(x) * flip.call(y))
         x.inplace * y
         assert { x == expected }
+
+        m = small.call([300, 48], 4)
+        row = small.call([48])
+        expected = flip.call(flip.call(m) - flip.call(row))
+        m.inplace - row
+        assert { m == expected }
       end
 
       test "binary on operands that do not start on 16 bytes" do
@@ -1257,11 +1264,12 @@ class NArrayTest < Test::Unit::TestCase
         assert { y - x == flip.call(flip.call(y) - flip.call(x)) }
       end
 
-      if [Cumo::DFloat, Cumo::SFloat, Cumo::HFloat, Cumo::BFloat].include?(dtype)
+      if [Cumo::DFloat, Cumo::SFloat, Cumo::HFloat, Cumo::BFloat, Cumo::SComplex].include?(dtype)
         test "a math function over lengths that end short of 16 bytes" do
+          func = dtype == Cumo::SComplex ? :exp : :gelu
           [1, 7, 17, 1027].each do |n|
             x = dtype.cast(Array.new(n) { |i| (i % 7 - 3) * 0.5 })
-            assert { dtype::Math.gelu(x) == flip.call(dtype::Math.gelu(flip.call(x))) }
+            assert { dtype::Math.send(func, x) == flip.call(dtype::Math.send(func, flip.call(x))) }
           end
         end
       end

@@ -24,7 +24,7 @@ __global__ void <%="cumo_#{c_iter}_kernel_dim#{idim}"%>(cumo_na_iarray_t a1, cum
 }
 <% end %>
 
-//<% vec_ok = !(is_int and name == 'reciprocal') %>
+//<% vec_ok = type_name != 'dcomplex' && !(is_int and name == 'reciprocal') %>
 //<% if vec_ok %>
 // Moves 16 bytes per thread; see cumo_na_indexer_vec_row.
 __global__ void <%="cumo_#{c_iter}_vec_kernel"%>(char* p1, char* p2, uint32_t n)

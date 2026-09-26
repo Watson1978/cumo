@@ -106,7 +106,7 @@ static int
     return 1;
 }
 
-//<% vec_ok = !(is_int and %w[div mod].include? name) %>
+//<% vec_ok = type_name != 'dcomplex' && !(is_int and %w[div mod].include? name) %>
 //<% if vec_ok %>
 // Moves 16 bytes of each operand per thread; see cumo_na_indexer_vec_row.
 // use_scalar is as in the kernels above, and p2 goes unused when it is set.
@@ -208,15 +208,6 @@ void <%="cumo_#{c_iter}_kernel_launch"%>(cumo_na_iarray_t* a1, cumo_na_iarray_t*
     if (<%="cumo_#{c_iter}_launch_transpose"%>(a1,a2,a3,indexer,divzero)) {
         return;
     }
-    //<% if vec_ok %>
-    {
-        dtype sv;
-        memset(&sv, 0, sizeof(dtype));
-        if (<%="cumo_#{c_iter}_launch_vec"%>(a1,a2,a3,indexer,sv,0)) {
-            return;
-        }
-    }
-    //<% end %>
     grid_dim = cumo_get_grid_dim(indexer->total_size);
     block_dim = cumo_get_block_dim(indexer->total_size);
     <%= indexer_switch("cumo_#{c_iter}_kernel", "*a1,*a2,*a3,*indexer,divzero", narrow: %w[a1 a2 a3]) %>
