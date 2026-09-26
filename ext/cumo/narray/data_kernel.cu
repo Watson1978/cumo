@@ -360,12 +360,75 @@ cumo_copy_wide_launch(cumo_na_iarray_t* dst, cumo_na_iarray_t* src, cumo_na_inde
     }
 }
 
+// concatenate puts each part into its own columns of a fresh array. One launch
+// writes every part: blockIdx.y picks the part, and the table of parts rides in
+// as a kernel parameter, which is why it has to be a grid constant.
+#define CUMO_CONCAT_MAX_PARTS 64
+
+typedef struct {
+    const char* src[CUMO_CONCAT_MAX_PARTS];
+    uint32_t width[CUMO_CONCAT_MAX_PARTS];
+    uint32_t offset[CUMO_CONCAT_MAX_PARTS];
+} cumo_concat_parts_t;
+
+template<typename V>
+__global__ void cumo_concat_kernel(char* dst, CUMO_GRID_CONSTANT cumo_concat_parts_t parts, uint32_t rows, uint32_t row_width)
+{
+    uint32_t w = parts.width[blockIdx.y];
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows * w) {
+        uint32_t r = i / w;
+        ((V*)dst)[(size_t)r * row_width + parts.offset[blockIdx.y] + (i - r * w)] = ((const V*)parts.src[blockIdx.y])[i];
+    }
+}
+
 #if defined(__cplusplus)
 extern "C" {
 #if 0
 } /* satisfy cc-mode */
 #endif
 #endif
+
+// Answers 0, launching nothing, when there are more parts than one launch
+// takes or the result is too large to index in 32 bits. A part here is never
+// empty, and row_bytes is what one row of it holds.
+int
+cumo_na_concat_kernel_launch(char* dst, char** srcs, size_t* row_bytes, int n, size_t rows)
+{
+    cumo_concat_parts_t parts;
+    uintptr_t bits = (uintptr_t)dst;
+    size_t row = 0, widest = 0, w;
+    int k;
+
+    if (n <= 0 || n > CUMO_CONCAT_MAX_PARTS || rows == 0) { return 0; }
+    for (k = 0; k < n; ++k) {
+        row += row_bytes[k];
+        bits |= (uintptr_t)row_bytes[k] | (uintptr_t)srcs[k];
+    }
+    for (w = 16; w > 1 && bits % w != 0; w /= 2) {}
+    if (rows > UINT32_MAX / (row / w)) { return 0; }
+
+    row = 0;
+    for (k = 0; k < n; ++k) {
+        parts.src[k] = srcs[k];
+        parts.width[k] = (uint32_t)(row_bytes[k] / w);
+        parts.offset[k] = (uint32_t)(row / w);
+        row += row_bytes[k];
+        if (parts.width[k] > widest) { widest = parts.width[k]; }
+    }
+
+    dim3 grid((unsigned int)((rows * widest + CUMO_MAX_BLOCK_DIM - 1) / CUMO_MAX_BLOCK_DIM), (unsigned int)n);
+    uint32_t row_width = (uint32_t)(row / w);
+    switch (w) {
+    case 16: cumo_concat_kernel<uint4><<<grid, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, (uint32_t)rows, row_width); break;
+    case 8: cumo_concat_kernel<uint2><<<grid, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, (uint32_t)rows, row_width); break;
+    case 4: cumo_concat_kernel<uint32_t><<<grid, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, (uint32_t)rows, row_width); break;
+    case 2: cumo_concat_kernel<uint16_t><<<grid, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, (uint32_t)rows, row_width); break;
+    default: cumo_concat_kernel<uint8_t><<<grid, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, (uint32_t)rows, row_width); break;
+    }
+    cumo_cuda_runtime_check_kernel_launch();
+    return 1;
+}
 
 // Launches nothing and answers 0 unless the last dimension is contiguous and aligned on both sides.
 int
