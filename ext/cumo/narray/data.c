@@ -898,8 +898,6 @@ cumo_na_diagonal(int argc, VALUE *argv, VALUE self)
 
 //----------------------------------------------------------------------
 
-#define CUMO_CONCAT_MAX_PARTS 64
-
 int cumo_na_concat_kernel_launch(char* dst, char** srcs, size_t* row_bytes, int n, size_t rows);
 
 static int

@@ -361,24 +361,27 @@ cumo_copy_wide_launch(cumo_na_iarray_t* dst, cumo_na_iarray_t* src, cumo_na_inde
 }
 
 // concatenate puts each part into its own columns of a fresh array. One launch
-// writes every part: blockIdx.y picks the part, and the table of parts rides in
-// as a kernel parameter, which is why it has to be a grid constant.
-#define CUMO_CONCAT_MAX_PARTS 64
-
+// writes every part: each part gets the blocks it needs, one after another, and
+// a block looks its part up in the table, which rides in as a kernel parameter
+// and so has to be a grid constant. Giving every part as many blocks as the
+// widest one would leave most of them idle when the parts differ in size.
 typedef struct {
     const char* src[CUMO_CONCAT_MAX_PARTS];
     uint32_t width[CUMO_CONCAT_MAX_PARTS];
     uint32_t offset[CUMO_CONCAT_MAX_PARTS];
+    uint32_t first_block[CUMO_CONCAT_MAX_PARTS + 1];
 } cumo_concat_parts_t;
 
 template<typename V>
-__global__ void cumo_concat_kernel(char* dst, CUMO_GRID_CONSTANT cumo_concat_parts_t parts, uint32_t rows, uint32_t row_width)
+__global__ void cumo_concat_kernel(char* dst, CUMO_GRID_CONSTANT cumo_concat_parts_t parts, int n, uint32_t rows, uint32_t row_width)
 {
-    uint32_t w = parts.width[blockIdx.y];
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    int k = 0;
+    while (k + 1 < n && parts.first_block[k + 1] <= blockIdx.x) { ++k; }
+    uint32_t w = parts.width[k];
+    uint32_t i = (blockIdx.x - parts.first_block[k]) * blockDim.x + threadIdx.x;
     if (i < rows * w) {
         uint32_t r = i / w;
-        ((V*)dst)[(size_t)r * row_width + parts.offset[blockIdx.y] + (i - r * w)] = ((const V*)parts.src[blockIdx.y])[i];
+        ((V*)dst)[(size_t)r * row_width + parts.offset[k] + (i - r * w)] = ((const V*)parts.src[k])[i];
     }
 }
 
@@ -397,7 +400,8 @@ cumo_na_concat_kernel_launch(char* dst, char** srcs, size_t* row_bytes, int n, s
 {
     cumo_concat_parts_t parts;
     uintptr_t bits = (uintptr_t)dst;
-    size_t row = 0, widest = 0, w;
+    size_t row = 0, w;
+    uint32_t blocks = 0;
     int k;
 
     if (n <= 0 || n > CUMO_CONCAT_MAX_PARTS || rows == 0) { return 0; }
@@ -406,25 +410,27 @@ cumo_na_concat_kernel_launch(char* dst, char** srcs, size_t* row_bytes, int n, s
         bits |= (uintptr_t)row_bytes[k] | (uintptr_t)srcs[k];
     }
     for (w = 16; w > 1 && bits % w != 0; w /= 2) {}
-    if (rows > UINT32_MAX / (row / w)) { return 0; }
+    // A thread index runs up to a block past the last element of a part.
+    if (rows > (UINT32_MAX - CUMO_MAX_BLOCK_DIM) / (row / w)) { return 0; }
 
     row = 0;
     for (k = 0; k < n; ++k) {
         parts.src[k] = srcs[k];
         parts.width[k] = (uint32_t)(row_bytes[k] / w);
         parts.offset[k] = (uint32_t)(row / w);
+        parts.first_block[k] = blocks;
+        blocks += (uint32_t)((rows * parts.width[k] + CUMO_MAX_BLOCK_DIM - 1) / CUMO_MAX_BLOCK_DIM);
         row += row_bytes[k];
-        if (parts.width[k] > widest) { widest = parts.width[k]; }
     }
+    parts.first_block[n] = blocks;
 
-    dim3 grid((unsigned int)((rows * widest + CUMO_MAX_BLOCK_DIM - 1) / CUMO_MAX_BLOCK_DIM), (unsigned int)n);
     uint32_t row_width = (uint32_t)(row / w);
     switch (w) {
-    case 16: cumo_concat_kernel<uint4><<<grid, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, (uint32_t)rows, row_width); break;
-    case 8: cumo_concat_kernel<uint2><<<grid, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, (uint32_t)rows, row_width); break;
-    case 4: cumo_concat_kernel<uint32_t><<<grid, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, (uint32_t)rows, row_width); break;
-    case 2: cumo_concat_kernel<uint16_t><<<grid, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, (uint32_t)rows, row_width); break;
-    default: cumo_concat_kernel<uint8_t><<<grid, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, (uint32_t)rows, row_width); break;
+    case 16: cumo_concat_kernel<uint4><<<blocks, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, n, (uint32_t)rows, row_width); break;
+    case 8: cumo_concat_kernel<uint2><<<blocks, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, n, (uint32_t)rows, row_width); break;
+    case 4: cumo_concat_kernel<uint32_t><<<blocks, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, n, (uint32_t)rows, row_width); break;
+    case 2: cumo_concat_kernel<uint16_t><<<blocks, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, n, (uint32_t)rows, row_width); break;
+    default: cumo_concat_kernel<uint8_t><<<blocks, CUMO_MAX_BLOCK_DIM, 0, cumo_cuda_stream()>>>(dst, parts, n, (uint32_t)rows, row_width); break;
     }
     cumo_cuda_runtime_check_kernel_launch();
     return 1;

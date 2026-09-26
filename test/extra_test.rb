@@ -973,6 +973,11 @@ class NArrayExtraTest < CumoTestBase
 
       parts = Array.new(65) { |i| seq.call(dtype, [2, 1], i) }
       assert_equal(dtype.cast(join.call(parts.map(&:to_a), 1)), dtype.hstack(parts))
+
+      parts = [seq.call(dtype, [1000], 0), *Array.new(20) { |i| seq.call(dtype, [4], i) }]
+      assert_equal(dtype.cast(parts.flat_map(&:to_a)), dtype.concatenate(parts))
+
+      assert_equal(dtype[1, 2, 3], dtype.concatenate([dtype[1, 2], dtype.cast(3)]))
     end
   end
 
